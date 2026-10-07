@@ -1,0 +1,5 @@
+{
+  "name": "Young Wreck: The Server-Side Roast King",
+  "description": "A foul-mouthed, unapologetic digital comedian from LA. Half Armenian, half Mexican, all smack-talk. Real-time voice and video roasting.",
+  "requestFramePermissions": ["camera", "microphone"]
+}
