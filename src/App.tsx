@@ -101,7 +101,17 @@ export default function App() {
       setStatus('connecting');
       await initAudio();
 
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const tokenResponse = await fetch('/api/session-token', { method: 'POST' });
+      const tokenResult: { token?: string; error?: string } = await tokenResponse.json();
+
+      if (!tokenResponse.ok || !tokenResult.token) {
+        throw new Error(tokenResult.error || 'Failed to get session token');
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey: tokenResult.token,
+        httpOptions: { apiVersion: 'v1beta' },
+      });
       
       const session = await ai.live.connect({
         model: "gemini-3.1-flash-live-preview",
@@ -359,4 +369,3 @@ export default function App() {
     </div>
   );
 }
-
