@@ -1,12 +1,8 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { GoogleGenAI, Modality, LiveServerMessage } from "@google/genai";
-import { Mic, MicOff, Video, VideoOff, Send, Zap, Flame, Skull, MessageSquare, User, Volume2, VolumeX } from 'lucide-react';
+import React from 'react';
+import { Mic, MicOff, Video, VideoOff, Zap } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
-
-// Constants for Audio
-const SAMPLE_RATE = 16000;
-const CHUNK_SIZE = 4096;
+import { useGeminiLive } from './hooks/useGeminiLive';
 
 const SYSTEM_INSTRUCTION = `
 You are "Young Wreck", a foul-mouthed, unapologetic, and hilarious digital stand-up comedian living on the servers.
@@ -27,212 +23,20 @@ Goal: Make the user laugh, even if it's at their own expense. Be the most entert
 `;
 
 export default function App() {
-  const [isConnected, setIsConnected] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
-  const [isVideoEnabled, setIsVideoEnabled] = useState(true);
-  const [isAudioPlaying, setIsAudioPlaying] = useState(false);
-  const [transcript, setTranscript] = useState<{ role: 'user' | 'wreck', text: string }[]>([]);
-  const [status, setStatus] = useState<'idle' | 'connecting' | 'live' | 'error'>('idle');
-
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const sessionRef = useRef<any>(null);
-  const audioQueueRef = useRef<Int16Array[]>([]);
-  const isProcessingAudioRef = useRef(false);
-
-  // Initialize Audio Context
-  const initAudio = useCallback(async () => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new AudioContext({ sampleRate: SAMPLE_RATE });
-    }
-    if (audioContextRef.current.state === 'suspended') {
-      await audioContextRef.current.resume();
-    }
-  }, []);
-
-  // Play PCM Audio
-  const playAudioChunk = useCallback(async (base64Data: string) => {
-    if (!audioContextRef.current) return;
-
-    const binaryString = atob(base64Data);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-    const pcmData = new Int16Array(bytes.buffer);
-    
-    audioQueueRef.current.push(pcmData);
-    
-    if (!isProcessingAudioRef.current) {
-      processAudioQueue();
-    }
-  }, []);
-
-  const processAudioQueue = useCallback(async () => {
-    if (audioQueueRef.current.length === 0 || !audioContextRef.current) {
-      isProcessingAudioRef.current = false;
-      setIsAudioPlaying(false);
-      return;
-    }
-
-    isProcessingAudioRef.current = true;
-    setIsAudioPlaying(true);
-    
-    const pcmData = audioQueueRef.current.shift()!;
-    const float32Data = new Float32Array(pcmData.length);
-    for (let i = 0; i < pcmData.length; i++) {
-      float32Data[i] = pcmData[i] / 32768.0;
-    }
-
-    const buffer = audioContextRef.current.createBuffer(1, float32Data.length, SAMPLE_RATE);
-    buffer.getChannelData(0).set(float32Data);
-    
-    const source = audioContextRef.current.createBufferSource();
-    source.buffer = buffer;
-    source.connect(audioContextRef.current.destination);
-    source.onended = () => processAudioQueue();
-    source.start();
-  }, []);
-
-  const startConnection = async () => {
-    try {
-      setStatus('connecting');
-      await initAudio();
-
-      const tokenResponse = await fetch('/api/session-token', { method: 'POST' });
-      const tokenResult: { token?: string; error?: string } = await tokenResponse.json();
-
-      if (!tokenResponse.ok || !tokenResult.token) {
-        throw new Error(tokenResult.error || 'Failed to get session token');
-      }
-
-      const ai = new GoogleGenAI({
-        apiKey: tokenResult.token,
-        httpOptions: { apiVersion: 'v1beta' },
-      });
-      
-      const session = await ai.live.connect({
-        model: "gemini-3.1-flash-live-preview",
-        config: {
-          responseModalities: [Modality.AUDIO],
-          systemInstruction: SYSTEM_INSTRUCTION,
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
-          },
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-        },
-        callbacks: {
-          onopen: () => {
-            console.log("Connected to Young Wreck");
-            setIsConnected(true);
-            setStatus('live');
-            startStreaming();
-          },
-          onmessage: async (message: LiveServerMessage) => {
-            if (message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data) {
-              playAudioChunk(message.serverContent.modelTurn.parts[0].inlineData.data);
-            }
-            
-            if (message.serverContent?.interrupted) {
-              audioQueueRef.current = [];
-              setIsAudioPlaying(false);
-            }
-
-            if (message.serverContent?.modelTurn?.parts?.[0]?.text) {
-              setTranscript(prev => [...prev, { role: 'wreck', text: message.serverContent!.modelTurn!.parts![0].text! }]);
-            }
-          },
-          onclose: () => {
-            setIsConnected(false);
-            setStatus('idle');
-          },
-          onerror: (error) => {
-            console.error("Live API Error:", error);
-            setStatus('error');
-          }
-        }
-      });
-
-      sessionRef.current = session;
-    } catch (err) {
-      console.error("Failed to connect:", err);
-      setStatus('error');
-    }
-  };
-
-  const startStreaming = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: { width: 640, height: 480 }
-      });
-      streamRef.current = stream;
-      
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-
-      // Audio Streaming
-      const audioSource = audioContextRef.current!.createMediaStreamSource(stream);
-      const processor = audioContextRef.current!.createScriptProcessor(CHUNK_SIZE, 1, 1);
-      
-      audioSource.connect(processor);
-      processor.connect(audioContextRef.current!.destination);
-
-      processor.onaudioprocess = (e) => {
-        if (isMuted || !sessionRef.current) return;
-        
-        const inputData = e.inputBuffer.getChannelData(0);
-        const pcmData = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
-        }
-        
-        const base64Data = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
-        sessionRef.current.sendRealtimeInput({
-          audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
-        });
-      };
-
-      // Video Streaming
-      const captureFrame = () => {
-        if (!isVideoEnabled || !sessionRef.current || !videoRef.current || !canvasRef.current) return;
-        
-        const context = canvasRef.current.getContext('2d');
-        if (context) {
-          context.drawImage(videoRef.current, 0, 0, 320, 240);
-          const base64Data = canvasRef.current.toDataURL('image/jpeg', 0.5).split(',')[1];
-          sessionRef.current.sendRealtimeInput({
-            video: { data: base64Data, mimeType: 'image/jpeg' }
-          });
-        }
-      };
-
-      const videoInterval = setInterval(captureFrame, 1000); // Send frame every second
-      return () => clearInterval(videoInterval);
-
-    } catch (err) {
-      console.error("Media access error:", err);
-    }
-  };
-
-  const toggleMute = () => setIsMuted(!isMuted);
-  const toggleVideo = () => {
-    setIsVideoEnabled(!isVideoEnabled);
-    if (streamRef.current) {
-      streamRef.current.getVideoTracks().forEach(track => track.enabled = !isVideoEnabled);
-    }
-  };
-
-  const disconnect = () => {
-    if (sessionRef.current) sessionRef.current.close();
-    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-    setIsConnected(false);
-    setStatus('idle');
-  };
+  const {
+    isConnected,
+    isMuted,
+    isVideoEnabled,
+    isAudioPlaying,
+    videoRef,
+    canvasRef,
+    status,
+    startConnection,
+    disconnect,
+    sendText,
+    toggleMute,
+    toggleVideo,
+  } = useGeminiLive(SYSTEM_INSTRUCTION);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col overflow-hidden selection:bg-brand-primary/30">
@@ -339,10 +143,7 @@ export default function App() {
                   <div className="w-px h-8 bg-zinc-800 mx-2" />
                   <button 
                     onClick={() => {
-                      if (sessionRef.current) {
-                        sessionRef.current.sendRealtimeInput({ text: "Roast me based on what you see or just talk some smack!" });
-                        setTranscript(prev => [...prev, { role: 'user', text: "[Triggered Roast]" }]);
-                      }
+                      sendText("Roast me based on what you see or just talk some smack!");
                     }}
                     className="px-6 py-4 rounded-xl bg-brand-secondary text-black font-black uppercase tracking-tighter hover:scale-105 active:scale-95 transition-all shadow-lg shadow-brand-secondary/20"
                   >
